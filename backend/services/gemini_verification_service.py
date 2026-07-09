@@ -72,16 +72,21 @@ Article Text:
         else:
             # currently only gemini-2.0-pro-exp supports thinking, gemini-2.5-flash does not
             # if thinking is none, we don't pass it.
-            thinking_config = types.ThinkingConfig(thinking_budget_tokens=1024)
+            thinking_config = types.ThinkingConfig(thinking_budget=1024)
 
         config_args = {
             "tools": [types.Tool(google_search=types.GoogleSearch())],
-            "temperature": 1.0,
+            "temperature": 0.2,
         }
+        
+        if thinking_config is not None:
+            config_args["thinking_config"] = thinking_config
         
         # Add instructions to the prompt to force JSON format, since we can't use response_mime_type with tools
         json_instruction = """
-IMPORTANT: You MUST return your response as a valid JSON object EXACTLY matching the following structure. Do not wrap it in markdown block quotes (```json), just return the raw JSON object.
+IMPORTANT: You MUST return your response as a valid JSON object EXACTLY matching the following structure. Do not wrap it in markdown block quotes (```json), just return the raw JSON object. You may include Google Search citation markers like [1] or [2] inside the string fields.
+
+CRITICAL: To avoid recitation filters, DO NOT quote any sources directly. You MUST paraphrase and synthesize all information entirely in your own words.
 {
   "verdict": "Likely True" | "Likely False" | "Mixed" | "Unverifiable",
   "fake_likelihood": float (0-100),
@@ -109,7 +114,10 @@ IMPORTANT: You MUST return your response as a valid JSON object EXACTLY matching
             response = await asyncio.wait_for(_call_gemini(), timeout=timeout_seconds)
 
             if not response.text:
-                return self._create_fallback_response("Model returned empty response.")
+                reason = "Unknown"
+                if response.candidates:
+                    reason = str(response.candidates[0].finish_reason)
+                return self._create_fallback_response(f"Model returned empty response. Finish reason: {reason}")
 
             raw_text = response.text.strip()
             # Clean up potential markdown formatting

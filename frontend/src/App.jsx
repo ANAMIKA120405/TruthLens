@@ -1,479 +1,568 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import { motion } from 'framer-motion';
 import {
-  FiActivity,
-  FiAlertCircle,
   FiBarChart2,
-  FiCheckCircle,
+  FiBookOpen,
   FiClock,
   FiDatabase,
+  FiFileText,
   FiInfo,
-  FiRefreshCw,
-  FiSearch,
+  FiShield,
+  FiType,
 } from 'react-icons/fi';
-import { Doughnut } from 'react-chartjs-2';
-import { Chart as ChartJS, ArcElement, Tooltip, Legend } from 'chart.js';
-
-ChartJS.register(ArcElement, Tooltip, Legend);
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api';
 
-function toneFor(prediction = '') {
-  if (prediction.includes('Fake')) {
-    return {
-      icon: FiAlertCircle,
-      text: 'text-rose-400',
-      bg: 'bg-rose-500/10',
-      border: 'border-rose-500/30',
-      chart: ['rgba(244, 63, 94, 0.85)', 'rgba(34, 197, 94, 0.65)'],
-    };
-  }
+const cardPanel = 'rounded-[18px] border border-[rgba(148,163,184,0.08)] bg-[rgba(255,255,255,0.54)] backdrop-blur-[4px] shadow-[0_2px_10px_rgba(15,23,42,0.02)]';
+const subCard = 'rounded-[16px] border border-[rgba(148,163,184,0.08)] bg-[rgba(255,255,255,0.68)] backdrop-blur-[4px] shadow-[0_2px_8px_rgba(15,23,42,0.02)]';
 
-  if (prediction.includes('Real')) {
-    return {
-      icon: FiCheckCircle,
-      text: 'text-emerald-400',
-      bg: 'bg-emerald-500/10',
-      border: 'border-emerald-500/30',
-      chart: ['rgba(244, 63, 94, 0.65)', 'rgba(34, 197, 94, 0.85)'],
-    };
-  }
+const SAMPLE_ARTICLE = `City officials approved a new housing initiative on Monday after months of hearings, according to documents posted on the municipal website. The program will convert an unused warehouse district into mixed-income apartments, with a portion reserved for teachers, transit workers, and first responders.
 
-  return {
-    icon: FiInfo,
-    text: 'text-amber-300',
-    bg: 'bg-amber-500/10',
-    border: 'border-amber-500/30',
-    chart: ['rgba(245, 158, 11, 0.85)', 'rgba(82, 82, 91, 0.8)'],
-  };
-}
-
-function formatAdjustment(value) {
-  if (value > 0) return `+${value}`;
-  return `${value}`;
-}
-
-function ExplanationHighlighter({ text, explanation }) {
-  const wordWeights = useMemo(() => {
-    const weights = new Map();
-    explanation?.forEach(([word, weight]) => {
-      weights.set(String(word).toLowerCase().replace(/[^a-z0-9\s'-]/g, '').trim(), weight);
-    });
-    return weights;
-  }, [explanation]);
-
-  if (!explanation || explanation.length === 0) {
-    return <p className="leading-7 text-zinc-300">{text}</p>;
-  }
-
-  return (
-    <p className="leading-7 text-zinc-300">
-      {text.split(/(\s+)/).map((word, idx) => {
-        const cleanWord = word.toLowerCase().replace(/[^a-z0-9'-]/g, '');
-        const weight = wordWeights.get(cleanWord);
-
-        if (!weight) {
-          return <span key={idx}>{word}</span>;
-        }
-
-        const isFakeSignal = weight > 0;
-        const colorClass = isFakeSignal
-          ? 'bg-rose-500/25 text-rose-100'
-          : 'bg-emerald-500/20 text-emerald-100';
-
-        return (
-          <span key={idx} className={`${colorClass} rounded px-1 font-medium`} title={`Weight: ${weight.toFixed(3)}`}>
-            {word}
-          </span>
-        );
-      })}
-    </p>
-  );
-}
-
-function RiskChart({ result }) {
-  const tone = toneFor(result.prediction);
-  const data = {
-    labels: ['Fake risk', 'Real likelihood'],
-    datasets: [
-      {
-        data: [result.fake_probability, result.real_probability],
-        backgroundColor: tone.chart,
-        borderColor: ['rgba(24, 24, 27, 1)', 'rgba(24, 24, 27, 1)'],
-        borderWidth: 2,
-      },
-    ],
-  };
-
-  return (
-    <Doughnut
-      data={data}
-      options={{
-        cutout: '68%',
-        plugins: {
-          legend: {
-            position: 'bottom',
-            labels: { color: '#d4d4d8', boxWidth: 10, padding: 12 },
-          },
-        },
-      }}
-    />
-  );
-}
+Supporters say the plan could reduce vacancy pressure and bring new foot traffic to nearby businesses, while critics argue the city should focus on existing infrastructure before expanding development incentives.`;
 
 function App() {
   const [text, setText] = useState('');
-  const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [history, setHistory] = useState([]);
-  const [stats, setStats] = useState(null);
   const [modelInfo, setModelInfo] = useState(null);
+  const [loadingPrediction, setLoadingPrediction] = useState(false);
   const [error, setError] = useState('');
 
-  useEffect(() => {
-    axios
-      .get(`${API_URL}/model-info`)
-      .then((response) => setModelInfo(response.data))
-      .catch(() => setModelInfo(null));
+  const textareaRef = useRef(null);
+
+  const charCount = useMemo(() => text.trim().length, [text]);
+  const wordCount = useMemo(() => text.trim().split(/\s+/).filter(Boolean).length, [text]);
+  const canAnalyze = charCount >= 30 && wordCount >= 5 && !loadingPrediction;
+
+  const loadModelInfo = useCallback(async () => {
+    try {
+      const response = await axios.get(`${API_URL}/model-info`);
+      setModelInfo(response.data);
+    } catch {
+      setModelInfo(null);
+    }
   }, []);
 
-  const ensureDemoToken = async (forceRefresh = false) => {
-    let token = localStorage.getItem('token');
-    if (token && !forceRefresh) return token;
-
-    if (forceRefresh) {
-      localStorage.removeItem('token');
+  const handlePredict = useCallback(async () => {
+    if (!canAnalyze) {
+      return;
     }
 
-    try {
-      await axios.post(`${API_URL}/register`, {
-        username: 'demo_user',
-        email: 'demo@example.com',
-        password: 'password123',
-      });
-    } catch (err) {
-      // The demo account probably already exists in the in-memory store.
-    }
-
-    const response = await axios.post(`${API_URL}/login`, {
-      email: 'demo@example.com',
-      password: 'password123',
-    });
-    token = response.data.access_token;
-    localStorage.setItem('token', token);
-    return token;
-  };
-
-  const loadDashboard = async (token) => {
-    try {
-      const [historyResponse, statsResponse] = await Promise.all([
-        axios.get(`${API_URL}/history`, { headers: { Authorization: `Bearer ${token}` } }),
-        axios.get(`${API_URL}/stats`, { headers: { Authorization: `Bearer ${token}` } }),
-      ]);
-      setHistory(historyResponse.data.history || []);
-      setStats(statsResponse.data);
-    } catch (err) {
-      setHistory([]);
-      setStats(null);
-    }
-  };
-
-  const handlePredict = async (event) => {
-    event.preventDefault();
-    if (!text.trim()) return;
-
-    setLoading(true);
+    setLoadingPrediction(true);
     setError('');
 
     try {
-      const token = await ensureDemoToken();
-      let response;
-      try {
-        response = await axios.post(
-          `${API_URL}/predict`,
-          { text },
-          { headers: { Authorization: `Bearer ${token}` } },
-        );
-      } catch (err) {
-        if (err.response?.status !== 401) {
-          throw err;
-        }
-
-        const refreshedToken = await ensureDemoToken(true);
-        response = await axios.post(
-          `${API_URL}/predict`,
-          { text },
-          { headers: { Authorization: `Bearer ${refreshedToken}` } },
-        );
-      }
-
-      setResult(response.data);
-      await loadDashboard(localStorage.getItem('token'));
-    } catch (err) {
-      setError(err.response?.data?.detail || 'Could not analyze this text.');
+      const response = await axios.post(`${API_URL}/predict`, { text });
+      const nextResult = response.data;
+      setResult(nextResult);
+      setHistory((current) => [
+        {
+          id: crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`,
+          text,
+          prediction: nextResult.prediction,
+          confidence: nextResult.confidence,
+          timestamp: new Date().toISOString(),
+          result: nextResult,
+        },
+        ...current,
+      ].slice(0, 8));
+    } catch (predictError) {
+      setError(predictError.response?.data?.detail || 'Could not analyze this article.');
     } finally {
-      setLoading(false);
+      setLoadingPrediction(false);
+    }
+  }, [canAnalyze, text]);
+
+  useEffect(() => {
+    loadModelInfo();
+  }, [loadModelInfo]);
+
+  useEffect(() => {
+    const handleKeyDown = (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+        event.preventDefault();
+        handlePredict();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handlePredict]);
+
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) {
+      return;
+    }
+
+    textarea.style.height = 'auto';
+    textarea.style.height = `${Math.max(textarea.scrollHeight, 260)}px`;
+  }, [text]);
+
+  const handlePaste = async () => {
+    try {
+      const clipboardText = await navigator.clipboard.readText();
+      if (clipboardText.trim()) {
+        setText(clipboardText);
+      }
+    } catch {
+      setError('Clipboard access is unavailable in this browser context.');
     }
   };
 
-  const ResultIcon = toneFor(result?.prediction).icon;
-  const resultTone = toneFor(result?.prediction);
+  const handleSample = () => {
+    setText(SAMPLE_ARTICLE);
+    setError('');
+  };
+
+  const handleClear = () => {
+    setText('');
+    setResult(null);
+    setError('');
+  };
+
+  const reopenResult = (item) => {
+    setText(item.text);
+    setResult(item.result);
+  };
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100 selection:bg-cyan-500/30">
-      <header className="border-b border-zinc-800 bg-zinc-950/95">
-        <div className="mx-auto flex max-w-7xl flex-col gap-4 px-5 py-5 md:flex-row md:items-center md:justify-between">
-          <div>
-            <h1 className="text-2xl font-semibold tracking-normal text-white">TruthLens</h1>
-            <p className="mt-1 text-sm text-zinc-400">Hybrid fake-risk analysis for news text</p>
-          </div>
-          <div className="flex flex-wrap items-center gap-3 text-sm text-zinc-300">
-            <span className="inline-flex items-center gap-2 rounded border border-zinc-800 px-3 py-2">
-              <FiDatabase className="text-cyan-300" />
-              {modelInfo?.dataset_rows ? `${modelInfo.dataset_rows.toLocaleString()} training rows` : 'Model metadata unavailable'}
-            </span>
-            <span className="inline-flex items-center gap-2 rounded border border-zinc-800 px-3 py-2">
-              <FiActivity className="text-emerald-300" />
-              {modelInfo?.model_name || 'model'}
-            </span>
-          </div>
-        </div>
-      </header>
+    <div className="relative min-h-screen text-slate-900">
+      <main className="relative z-10 mx-auto max-w-[1260px] px-4 py-3 sm:px-6 sm:py-4 lg:px-8 lg:py-5">
+        <Hero modelInfo={modelInfo} />
 
-      <main className="mx-auto grid max-w-7xl gap-5 px-5 py-5 xl:grid-cols-[minmax(0,1.05fr)_minmax(380px,0.95fr)]">
-        <section className="rounded-lg border border-zinc-800 bg-zinc-900/70">
-          <div className="flex items-center justify-between border-b border-zinc-800 px-5 py-4">
-            <h2 className="flex items-center gap-2 text-base font-semibold">
-              <FiSearch className="text-cyan-300" />
-              Article Input
-            </h2>
-            <button
-              type="button"
-              onClick={() => {
-                setText('');
-                setResult(null);
-                setError('');
-              }}
-              className="inline-flex h-9 w-9 items-center justify-center rounded border border-zinc-700 text-zinc-300 transition hover:border-zinc-500 hover:text-white"
-              title="Clear"
-            >
-              <FiRefreshCw />
-            </button>
-          </div>
+        <section className="grid gap-2 py-2.5 sm:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)]">
+          <ArticleInput
+            text={text}
+            textareaRef={textareaRef}
+            charCount={charCount}
+            wordCount={wordCount}
+            canAnalyze={canAnalyze}
+            loadingPrediction={loadingPrediction}
+            error={error}
+            onChange={setText}
+            onAnalyze={handlePredict}
+            onPaste={handlePaste}
+            onSample={handleSample}
+            onClear={handleClear}
+          />
 
-          <form onSubmit={handlePredict} className="p-5">
-            <textarea
-              value={text}
-              onChange={(event) => setText(event.target.value)}
-              placeholder="Paste a news article here..."
-              className="h-[440px] w-full resize-none rounded border border-zinc-700 bg-zinc-950 p-4 text-sm leading-7 text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-cyan-400"
-            />
-            {error ? (
-              <div className="mt-3 rounded border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">
-                {error}
-              </div>
-            ) : null}
-            <button
-              type="submit"
-              disabled={loading || !text.trim()}
-              className="mt-4 inline-flex h-11 w-full items-center justify-center gap-2 rounded bg-cyan-500 px-4 text-sm font-semibold text-zinc-950 transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400"
-            >
-              {loading ? (
-                <span className="h-5 w-5 animate-spin rounded-full border-2 border-zinc-950 border-t-transparent" />
-              ) : (
-                <FiSearch />
-              )}
-              {loading ? 'Analyzing with model, rules, and live web search…' : 'Analyze'}
-            </button>
-          </form>
+          <PredictionResult result={result} />
         </section>
 
-        <section className="space-y-5">
-          <motion.div
-            initial={{ opacity: 0, y: 12 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="rounded-lg border border-zinc-800 bg-zinc-900/70"
-          >
-            <div className="border-b border-zinc-800 px-5 py-4">
-              <h2 className="flex items-center gap-2 text-base font-semibold">
-                <FiBarChart2 className="text-cyan-300" />
-                Result
-              </h2>
-            </div>
+        <section className="grid gap-3 pt-1 sm:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)]">
+          <RecentAnalyses history={history} onOpen={reopenResult} />
+          <ModelInformation modelInfo={modelInfo} />
+        </section>
 
-            {result ? (
-              <div className="p-5">
-                <div className={`rounded border ${resultTone.border} ${resultTone.bg} p-4`}>
-                  <div className="flex items-center justify-between gap-4">
-                    <div className="flex min-w-0 items-center gap-3">
-                      <ResultIcon className={`h-9 w-9 shrink-0 ${resultTone.text}`} />
-                      <div>
-                        <p className="text-xs uppercase tracking-wide text-zinc-400">Prediction</p>
-                        <p className={`mt-1 text-2xl font-semibold ${resultTone.text}`}>{result.prediction}</p>
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      <p className="text-xs uppercase tracking-wide text-zinc-400">Fake Risk</p>
-                      <p className="mt-1 text-2xl font-semibold text-white">{result.final_score}%</p>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="mt-5 grid gap-5 md:grid-cols-[180px_1fr]">
-                  <div className="mx-auto h-44 w-44">
-                    <RiskChart result={result} />
-                  </div>
-                  <div className="grid content-start gap-3 text-sm">
-                    <div className="flex justify-between border-b border-zinc-800 pb-2">
-                      <span className="text-zinc-400">
-                        Model fake risk {result.weights_used?.ml !== undefined && `(${(result.weights_used.ml * 100).toFixed(1)}% weight)`}
-                      </span>
-                      <span className="font-medium text-zinc-100">{result.ml_confidence}%</span>
-                    </div>
-                    <div className="flex justify-between border-b border-zinc-800 pb-2">
-                      <span className="text-zinc-400">
-                        Rule adjustment {result.weights_used?.rule !== undefined && `(${(result.weights_used.rule * 100).toFixed(1)}% weight)`}
-                      </span>
-                      <span className={result.rule_penalty > 0 ? 'font-medium text-rose-300' : 'font-medium text-emerald-300'}>
-                        {formatAdjustment(result.rule_penalty)}
-                      </span>
-                    </div>
-                    {result.gemini_enabled && !result.degraded_mode && (
-                        <div className="flex justify-between border-b border-zinc-800 pb-2">
-                          <span className="text-zinc-400">
-                            Web verification {result.weights_used?.gemini !== undefined && `(${(result.weights_used.gemini * 100).toFixed(1)}% weight)`}
-                          </span>
-                          <span className="font-medium text-zinc-100">{result.gemini_fake_likelihood}%</span>
-                        </div>
-                    )}
-                    <div className="flex justify-between border-b border-zinc-800 pb-2">
-                      <span className="text-zinc-400">Decision confidence</span>
-                      <span className="font-medium text-zinc-100">{result.confidence}%</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-zinc-400">Risk level</span>
-                      <span className="font-medium text-zinc-100">{result.risk_level}</span>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="mt-5 border-t border-zinc-800 pt-5">
-                  <h3 className="text-sm font-semibold text-zinc-100">Reasons</h3>
-                  <ul className="mt-3 space-y-2 text-sm text-zinc-300">
-                    {result.reasons.map((reason, index) => (
-                      <li key={`${reason}-${index}`} className="flex gap-2">
-                        <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-cyan-300" />
-                        <span>{reason}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-
-                <div className="mt-5 border-t border-zinc-800 pt-5">
-                  <h3 className="text-sm font-semibold text-zinc-100">Explanation Heatmap</h3>
-                  <div className="mt-3 max-h-52 overflow-y-auto pr-2 text-sm">
-                    <ExplanationHighlighter text={text} explanation={result.explanation} />
-                  </div>
-                </div>
-
-                <div className="mt-5 border-t border-zinc-800 pt-5">
-                  <h3 className="text-sm font-semibold text-zinc-100">Web Verification</h3>
-                  {result.gemini_enabled === false || result.degraded_mode ? (
-                    <p className="mt-3 text-sm text-zinc-400">
-                      {result.degraded_reason || "Web verification unavailable for this result."}
-                    </p>
-                  ) : (
-                    <div className="mt-3 space-y-4 text-sm text-zinc-300">
-                      <div className="flex items-center gap-3">
-                        <span className="rounded bg-zinc-800 px-2 py-1 font-semibold text-zinc-100">
-                          {result.gemini_verdict}
-                        </span>
-                        <span className="text-zinc-400">Confidence: {result.gemini_confidence}%</span>
-                      </div>
-                      
-                      {result.gemini_claims_checked && result.gemini_claims_checked.length > 0 && (
-                        <div>
-                          <h4 className="font-medium text-zinc-200">Claims Checked:</h4>
-                          <ul className="mt-2 list-inside list-disc space-y-1">
-                            {result.gemini_claims_checked.map((claim, idx) => (
-                              <li key={idx}>{claim}</li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
-                      
-                      {result.gemini_sources && result.gemini_sources.length > 0 && (
-                        <div>
-                          <h4 className="font-medium text-zinc-200">Sources:</h4>
-                          <div className="mt-2 space-y-2">
-                            {result.gemini_sources.map((source, idx) => {
-                              let hostname = source.url;
-                              try { hostname = new URL(source.url).hostname; } catch (e) {}
-                              return (
-                                <a 
-                                  key={idx} 
-                                  href={source.url} 
-                                  target="_blank" 
-                                  rel="noreferrer"
-                                  className="block rounded border border-zinc-800 p-3 hover:border-zinc-700 transition"
-                                >
-                                  <div className="font-medium text-cyan-400">{source.title}</div>
-                                  <div className="text-xs text-zinc-500 mt-1">{hostname}</div>
-                                  <div className="text-sm mt-1">{source.snippet}</div>
-                                </a>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      )}
-                      
-                      {result.gemini_search_suggestions_html && (
-                        <div 
-                          className="mt-4 pt-4 border-t border-zinc-800"
-                          dangerouslySetInnerHTML={{ __html: result.gemini_search_suggestions_html }} 
-                        />
-                      )}
-                    </div>
-                  )}
-                </div>
-
-                <p className="mt-5 border-t border-zinc-800 pt-4 text-xs leading-5 text-zinc-500">
-                  {result.model_warning}
-                </p>
-              </div>
-            ) : (
-              <div className="flex min-h-[520px] flex-col items-center justify-center gap-3 p-8 text-zinc-500">
-                <FiClock className="h-12 w-12 opacity-50" />
-                <p className="text-sm">Awaiting article submission</p>
-              </div>
-            )}
-          </motion.div>
-
-          <div className="rounded-lg border border-zinc-800 bg-zinc-900/70">
-            <div className="flex items-center justify-between border-b border-zinc-800 px-5 py-4">
-              <h2 className="text-base font-semibold">Session History</h2>
-              <span className="text-sm text-zinc-400">{stats?.total_predictions || 0} checked</span>
-            </div>
-            <div className="divide-y divide-zinc-800">
-              {history.length ? (
-                history.slice(0, 5).map((item) => (
-                  <div key={item._id} className="grid grid-cols-[1fr_auto] gap-3 px-5 py-3 text-sm">
-                    <span className="truncate text-zinc-300">{item.text}</span>
-                    <span className={toneFor(item.prediction).text}>
-                      {item.prediction} · {item.final_score}%
-                    </span>
-                  </div>
-                ))
-              ) : (
-                <p className="px-5 py-5 text-sm text-zinc-500">No predictions in this backend session</p>
-              )}
-            </div>
-          </div>
+        <section className="pt-0.5">
+          <WorkflowNotes />
         </section>
       </main>
     </div>
   );
+}
+
+
+function Hero({ modelInfo }) {
+  return (
+    <motion.section
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.25 }}
+      className="rounded-[18px] p-2 bg-transparent border-none shadow-none"
+    >
+      <div className="max-w-3xl space-y-0.5">
+        <div className="flex items-center gap-2">
+          <div className="flex h-10 w-10 items-center justify-center rounded-[12px] border border-[rgba(148,163,184,0.14)] bg-[rgba(255,255,255,0.85)] text-slate-900">
+            <FiFileText className="h-5 w-5" />
+          </div>
+          <h1 className="text-[1.45rem] font-semibold tracking-tight text-slate-900 sm:text-[1.75rem]">TruthLens</h1>
+        </div>
+
+        <p className="text-[0.95rem] font-semibold leading-[1.02] text-slate-900 sm:text-[1.12rem]">
+          Analyze articles.
+          <br />
+          Understand predictions.
+          <span className="text-blue-700"> Make informed decisions.</span>
+        </p>
+        <p className="max-w-2xl text-[0.82rem] leading-5 text-slate-500">TruthLens uses machine learning and explainable AI to estimate the credibility of news articles.</p>
+      </div>
+
+      <div className="mt-1 grid gap-2 sm:grid-cols-3">
+        <InfoCard icon={<FiDatabase />} label="53,847" value="Dataset Rows" sublabel="Dataset Rows" />
+        <InfoCard icon={<FiShield />} label="Model" value={modelInfo?.model_name || 'linear_svm'} sublabel="linear_svm" />
+        <InfoCard icon={<FiInfo />} label="This is an AI model." value="AI-assisted Analysis" sublabel="Not a fact-checker." />
+      </div>
+    </motion.section>
+  );
+}
+
+function ArticleInput({
+  text,
+  textareaRef,
+  charCount,
+  wordCount,
+  canAnalyze,
+  loadingPrediction,
+  error,
+  onChange,
+  onAnalyze,
+  onPaste,
+  onSample,
+  onClear,
+}) {
+  return (
+    <motion.section
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.25 }}
+      className={`${cardPanel} p-2.5 min-h-[22rem]`}
+    >
+      <SectionTitle icon={<FiType />} title="Article Input" />
+
+      <div className="mt-2.5 space-y-2">
+        <label className="block">
+          <span className="sr-only">Article text</span>
+          <textarea
+            ref={textareaRef}
+            value={text}
+            onChange={(event) => onChange(event.target.value)}
+            placeholder="Paste a news article, report, or statement here..."
+            className="min-h-[15rem] w-full resize-none rounded-[14px] border border-[rgba(148,163,184,0.12)] bg-[rgba(255,255,255,0.72)] px-4 py-2.5 text-[15px] leading-6 text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-blue-300 focus:ring-2 focus:ring-blue-200/50"
+          />
+        </label>
+
+        <div className="flex items-center gap-3 text-[0.78rem] text-slate-500">
+          <span>{charCount} characters</span>
+          <span>{wordCount} words</span>
+        </div>
+
+        <div className="grid gap-2 sm:grid-cols-[repeat(3,minmax(0,1fr))]">
+          <ActionButton label="Paste" onClick={onPaste} />
+          <ActionButton label="Sample Article" onClick={onSample} />
+          <ActionButton label="Clear" onClick={onClear} muted />
+        </div>
+
+        <div>
+          <ActionButton
+            label={loadingPrediction ? 'Analyzing...' : 'Analyze Article'}
+            onClick={onAnalyze}
+            primary
+            disabled={!canAnalyze || loadingPrediction}
+            fullWidth
+          />
+        </div>
+
+        {error ? <div className="rounded-[12px] border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div> : null}
+
+        <p className="text-xs leading-5 text-slate-500">Enter at least a few words before analyzing. Press Ctrl/Command + Enter to submit.</p>
+      </div>
+    </motion.section>
+  );
+}
+
+function PredictionResult({ result }) {
+  return (
+    <motion.section
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.25, delay: 0.05 }}
+      className={`${cardPanel} p-3 min-h-[24.5rem]`}
+    >
+      <SectionTitle icon={<FiBarChart2 />} title="Prediction Result" />
+
+      {!result ? (
+        <div className="flex min-h-[26rem] flex-col items-center justify-center px-6 text-center text-slate-400">
+          <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-full border border-[rgba(148,163,184,0.15)] bg-[rgba(255,255,255,0.82)] text-blue-700">
+            <FiFileText className="h-6 w-6" />
+          </div>
+          <p className="text-sm leading-6 text-slate-500">Your analysis results will appear here after you submit an article.</p>
+        </div>
+      ) : (
+        <div className="mt-3 space-y-3">
+          <div className={`${subCard} p-2`}>            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-[0.7rem] uppercase tracking-[0.18em] text-slate-500">Prediction</p>
+                <StatusPill prediction={result.prediction} />
+              </div>
+              <div className="text-right">
+                <p className="text-[0.7rem] uppercase tracking-[0.18em] text-slate-500">Confidence</p>
+                <p className="mt-1 text-lg font-semibold text-slate-900">{Number(result.confidence ?? 0).toFixed(0)}%</p>
+              </div>
+            </div>
+          </div>
+
+          <MetricRow label="Confidence" value={Number(result.confidence ?? 0)} tone="blue" />
+          <MetricRow label="Risk" value={result.risk_level || 'Unknown'} tone="amber" asText />
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <SmallStat label="Fake probability" value={`${Number(result.fake_probability ?? 0).toFixed(0)}%`} tone="red" />
+            <SmallStat label="Real probability" value={`${Number(result.real_probability ?? 0).toFixed(0)}%`} tone="green" />
+            <SmallStat label="ML confidence" value={`${Number(result.ml_confidence ?? 0).toFixed(0)}%`} tone="blue" />
+            <SmallStat label="Rule adjustment" value={signedValue(Number(result.rule_penalty ?? 0))} tone={Number(result.rule_penalty ?? 0) > 0 ? 'red' : 'green'} />
+          </div>
+
+          <div className={`${subCard} p-4`}>
+            <h3 className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Explanation</h3>
+            {result.reasons?.length ? (
+              <ul className="mt-3 space-y-2 text-sm leading-6 text-slate-700">
+                {result.reasons.map((reason, index) => (
+                  <li key={`${reason}-${index}`} className="flex gap-2">
+                    <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-blue-600" />
+                    <span>{reason}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="mt-3 text-sm text-slate-500">No explanation was returned for this analysis.</p>
+            )}
+          </div>
+
+          <div className={`${subCard} p-4`}>
+            <h3 className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Supporting Indicators</h3>
+            <div className="mt-3 space-y-3">
+              <IndicatorBar label="Fake risk" value={Number(result.fake_probability ?? 0)} tone="red" />
+              <IndicatorBar label="Real probability" value={Number(result.real_probability ?? 0)} tone="green" />
+              <IndicatorBar label="Decision confidence" value={Number(result.confidence ?? 0)} tone="blue" />
+            </div>
+          </div>
+        </div>
+      )}
+    </motion.section>
+  );
+}
+
+function RecentAnalyses({ history, onOpen }) {
+  return (
+    <motion.section
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.25, delay: 0.1 }}
+      className={`${cardPanel} p-3`}
+    >
+      <SectionTitle icon={<FiClock />} title="Recent Analyses" />
+
+      <div className="mt-3 space-y-2.5">
+        {history.length ? (
+          history.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => onOpen(item)}
+              className="w-full rounded-[16px] border border-[rgba(148,163,184,0.14)] bg-[rgba(255,255,255,0.86)] px-4 py-3 text-left transition hover:border-[rgba(148,163,184,0.22)] hover:bg-[rgba(255,255,255,0.92)] focus:outline-none focus:ring-2 focus:ring-blue-200/60"
+            >
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0 space-y-1">
+                  <p className="truncate text-sm leading-6 text-slate-800">{item.text}</p>
+                  <p className="text-xs text-slate-500">{formatTimestamp(item.timestamp)}</p>
+                </div>
+                <div className="shrink-0 text-right">
+                  <p className="text-sm font-medium text-slate-900">{item.prediction}</p>
+                  <p className="text-xs text-slate-500">{Number(item.confidence ?? 0).toFixed(0)}%</p>
+                </div>
+              </div>
+            </button>
+          ))
+        ) : (
+          <div className="rounded-[16px] border border-dashed border-[rgba(148,163,184,0.14)] bg-[rgba(255,255,255,0.86)] px-4 py-6 text-sm text-slate-500">
+            <p className="font-semibold text-slate-800">No recent analyses.</p>
+            <p className="mt-2 text-xs text-slate-500">Results you generate during this browser session will appear here.</p>
+          </div>
+        )}
+      </div>
+    </motion.section>
+  );
+}
+
+function ModelInformation({ modelInfo }) {
+  const rows = [
+    { icon: <FiDatabase />, label: 'Dataset Size', value: modelInfo?.dataset_rows ? modelInfo.dataset_rows.toLocaleString() : 'Unavailable' },
+    { icon: <FiShield />, label: 'Model', value: modelInfo?.model_name || 'Unavailable' },
+    { icon: <FiClock />, label: 'Version', value: modelInfo?.trained_at ? new Date(modelInfo.trained_at).toLocaleDateString() : 'Unavailable' },
+    { icon: <FiInfo />, label: 'Description', value: modelInfo?.warning || 'This model estimates credibility using machine learning and explainability signals.' },
+  ];
+
+  return (
+    <motion.section
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.25, delay: 0.15 }}
+      className={`${cardPanel} p-3`}
+    >
+      <SectionTitle icon={<FiDatabase />} title="Model Information" />
+
+      <div className="mt-3 space-y-2">
+        {rows.map((row) => (
+          <div key={row.label} className="flex items-start gap-3 rounded-[14px] border border-[rgba(148,163,184,0.12)] bg-[rgba(255,255,255,0.84)] px-3 py-2.5">
+            <span className="mt-0.5 text-blue-700">{row.icon}</span>
+            <div className="min-w-0 flex-1">
+              <p className="text-[0.68rem] font-medium uppercase tracking-[0.18em] text-slate-500">{row.label}</p>
+              <p className="mt-1 text-sm leading-5 text-slate-700">{row.value}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+    </motion.section>
+  );
+}
+
+function WorkflowNotes() {
+  return (
+    <motion.section
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.25, delay: 0.2 }}
+      className={`${cardPanel} p-3`}
+    >
+      <SectionTitle icon={<FiBookOpen />} title="Workflow Notes" />
+
+      <ul className="mt-3 space-y-1.5 text-sm leading-6 text-slate-700">
+        <li className="flex gap-2"><span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-blue-600" />Estimates article credibility</li>
+        <li className="flex gap-2"><span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-blue-600" />Verify with trusted sources</li>
+        <li className="flex gap-2"><span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-blue-600" />Supports decision-making</li>
+      </ul>
+    </motion.section>
+  );
+}
+
+function SectionTitle({ icon, title }) {
+  return (
+    <div className="flex items-center gap-2 text-[0.95rem] font-semibold text-slate-900">
+      <span className="text-blue-700">{icon}</span>
+      <span>{title}</span>
+    </div>
+  );
+}
+
+function InfoCard({ icon, label, value, sublabel }) {
+  return (
+    <div className="rounded-[18px] border border-[rgba(148,163,184,0.1)] bg-[rgba(255,255,255,0.72)] backdrop-blur-[4px] px-4 py-2.5 shadow-[0_3px_10px_rgba(15,23,42,0.02)]">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">{label}</p>
+          <p className="mt-1.5 text-sm font-semibold text-slate-900">{value}</p>
+          <p className="mt-1 text-[0.75rem] text-slate-500">{sublabel}</p>
+        </div>
+        <span className="rounded-[10px] border border-blue-100 bg-[rgba(235,245,255,0.95)] p-2 text-blue-700">{icon}</span>
+      </div>
+    </div>
+  );
+}
+
+function ActionButton({ label, onClick, primary = false, muted = false, disabled = false, fullWidth = false }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={`inline-flex h-10 items-center justify-center rounded-[12px] border px-4 text-sm font-semibold transition focus:outline-none focus:ring-2 focus:ring-blue-200/70 disabled:cursor-not-allowed disabled:opacity-60 ${fullWidth ? 'w-full' : ''} ${
+        primary
+          ? 'border-blue-600 bg-blue-600 text-white hover:bg-blue-700'
+          : muted
+            ? 'border-[rgba(148,163,184,0.16)] bg-[rgba(255,255,255,0.88)] text-slate-700 hover:bg-[rgba(255,255,255,0.94)]'
+            : 'border-[rgba(148,163,184,0.16)] bg-[rgba(255,255,255,0.88)] text-slate-700 hover:bg-[rgba(255,255,255,0.94)]'
+      }`}
+    >
+      {label}
+    </button>
+  );
+}
+
+function StatusPill({ prediction }) {
+  const tone = prediction?.includes('Fake') ? 'red' : prediction?.includes('Real') ? 'green' : 'amber';
+  const classes = {
+    red: 'border-red-200 bg-red-50 text-red-700',
+    green: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+    amber: 'border-amber-200 bg-amber-50 text-amber-700',
+  }[tone];
+
+  return <span className={`mt-2 inline-flex rounded-full border px-3 py-1.5 text-sm font-medium ${classes}`}>{prediction || 'Unknown'}</span>;
+}
+
+function MetricRow({ label, value, tone = 'blue', asText = false }) {
+  const colors = {
+    blue: 'bg-blue-600',
+    green: 'bg-emerald-600',
+    amber: 'bg-amber-500',
+    red: 'bg-red-600',
+  };
+  const textColors = {
+    blue: 'text-blue-700',
+    green: 'text-emerald-700',
+    amber: 'text-amber-700',
+    red: 'text-red-700',
+  };
+
+  return (
+    <div className="rounded-[16px] border border-[rgba(148,163,184,0.14)] bg-[rgba(255,255,255,0.84)] p-3">
+      <div className="flex items-center justify-between gap-4 text-sm">
+        <span className="font-medium text-slate-600">{label}</span>
+        <span className={`font-semibold ${textColors[tone]}`}>{asText ? value : `${Math.max(0, Math.min(100, Number(value)))}%`}</span>
+      </div>
+      {!asText ? (
+        <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-200">
+          <div className={`h-full rounded-full ${colors[tone]}`} style={{ width: `${Math.max(0, Math.min(100, Number(value)))}%` }} />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function SmallStat({ label, value, tone = 'blue' }) {
+  const textColors = {
+    blue: 'text-blue-700',
+    green: 'text-emerald-700',
+    amber: 'text-amber-700',
+    red: 'text-red-700',
+  };
+
+  return (
+    <div className="rounded-[16px] border border-[rgba(148,163,184,0.14)] bg-[rgba(255,255,255,0.86)] p-4">
+      <p className="text-[0.7rem] font-medium uppercase tracking-[0.18em] text-slate-500">{label}</p>
+      <p className={`mt-2 text-base font-semibold ${textColors[tone]}`}>{value}</p>
+    </div>
+  );
+}
+
+function IndicatorBar({ label, value, tone = 'blue' }) {
+  const colors = {
+    blue: 'bg-blue-600',
+    green: 'bg-emerald-600',
+    amber: 'bg-amber-500',
+    red: 'bg-red-600',
+  };
+
+  return (
+    <div>
+      <div className="flex items-center justify-between gap-3 text-xs text-slate-500">
+        <span>{label}</span>
+        <span>{Math.max(0, Math.min(100, value)).toFixed(0)}%</span>
+      </div>
+      <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200">
+        <div className={`h-full rounded-full ${colors[tone]}`} style={{ width: `${Math.max(0, Math.min(100, value))}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function signedValue(value) {
+  if (value > 0) return `+${value}`;
+  return `${value}`;
+}
+
+function formatTimestamp(timestamp) {
+  try {
+    return new Date(timestamp).toLocaleString([], {
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+  } catch {
+    return 'Recently';
+  }
 }
 
 export default App;

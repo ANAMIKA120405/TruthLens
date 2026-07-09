@@ -9,6 +9,7 @@ from bson import ObjectId
 
 router = APIRouter()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/login")
+oauth2_scheme_optional = OAuth2PasswordBearer(tokenUrl="api/login", auto_error=False)
 
 # Load ML service once
 prediction_service = PredictionService()
@@ -21,6 +22,21 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
     user = await users_collection.find_one({"email": email})
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    return user
+
+
+async def get_current_user_optional(token: str | None = Depends(oauth2_scheme_optional)):
+    if not token:
+        return None
+
+    payload = decode_access_token(token)
+    if not payload:
+        return None
+
+    email = payload.get("sub")
+    user = await users_collection.find_one({"email": email})
+    if not user:
+        return None
     return user
 
 @router.post("/register")
@@ -36,7 +52,7 @@ async def register(user: UserRegistration):
         "password": hashed_password
     }
     await users_collection.insert_one(user_dict)
-    return {"message": "User registered successfully"}
+    return {"message": "User registered successfully", "username": user.username, "email": user.email}
 
 @router.post("/login")
 async def login(user: UserLogin):
@@ -45,10 +61,15 @@ async def login(user: UserLogin):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
     access_token = create_access_token(data={"sub": user.email})
-    return {"access_token": access_token, "token_type": "bearer"}
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "username": db_user.get("username"),
+        "email": db_user.get("email"),
+    }
 
 @router.post("/predict", response_model=PredictionResponse)
-async def predict(request: PredictionRequest, current_user: dict = Depends(get_current_user)):
+async def predict(request: PredictionRequest, current_user: dict | None = Depends(get_current_user_optional)):
     try:
         # Analyze article
         start_time = datetime.datetime.utcnow()
@@ -57,7 +78,7 @@ async def predict(request: PredictionRequest, current_user: dict = Depends(get_c
         
         # Log prediction
         prediction_log = {
-            "user_id": current_user["email"],
+            "user_id": current_user["email"] if current_user else None,
             "text": request.text,
             "ml_confidence": result["ml_confidence"],
             "fake_probability": result["fake_probability"],
@@ -80,7 +101,9 @@ async def predict(request: PredictionRequest, current_user: dict = Depends(get_c
             "degraded_mode": result.get("degraded_mode"),
             "signal_conflict": result.get("signal_conflict")
         }
-        await predictions_collection.insert_one(prediction_log)
+
+        if current_user:
+            await predictions_collection.insert_one(prediction_log)
         
         return result
     except Exception as e:
